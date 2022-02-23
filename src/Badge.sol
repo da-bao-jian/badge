@@ -1,21 +1,83 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity >=0.8.0;
 
-// import "openzeppelin/token/ERC721/IERC721.sol";
-// import "openzeppelin/token/ERC721/extensions/IERC721Metadata.sol";
 import "openzeppelin/token/ERC721/IERC721Receiver.sol";
 import "openzeppelin/utils/Address.sol";
+import "openzeppelin/utils/introspection/IERC165.sol";
+
+interface IERC721 is IERC165 {
+    event Transfer(
+        address indexed from,
+        address indexed to,
+        uint256 indexed tokenId
+    );
+    event Approval(
+        address indexed owner,
+        address indexed approved,
+        uint256 indexed tokenId
+    );
+    event ApprovalForAll(
+        address indexed owner,
+        address indexed operator,
+        bool approved
+    );
+
+    function balanceOf(address owner) external view returns (uint256 balance);
+
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    function approve(address to, uint256 tokenId) external;
+
+    function getApproved(uint256 tokenId)
+        external
+        view
+        returns (address operator);
+
+    function setApprovalForAll(address operator, bool _approved) external;
+
+    function isApprovedForAll(address owner, address operator)
+        external
+        view
+        returns (bool);
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes calldata data
+    ) external;
+}
+
+interface IBadge is IERC721 {
+    // function getByteCode
+}
 
 /**
- * @dev Badge Contract is backward compatible with ERC721
+ * @dev Badge is the base contract to be inherited by all future
+ * badge contract. It takes three arguments in construction and is 
+ * backward compatible with ERC721.
+ * When a badge expires, it will be converted to a ERC721 token, 
+ * in other words, it will be fully transferable 
  */
-contract Badge {
+abstract contract Badge is IBadge {
     using Address for address;
 
     modifier onlyExpired(uint256 tokenId) {
         require(
-            _badgeMeta[tokenId].expirationDate > block.timestamp,
-            "Function only available for expiration"
+            _badgeMeta[tokenId].expired,
+            "Function only available for expired badges"
         );
         _;
     }
@@ -29,7 +91,7 @@ contract Badge {
     }
 
     // deployer's address
-    address public _manager;
+    address public immutable _manager;
 
     // Badge's name
     string private _name;
@@ -39,18 +101,21 @@ contract Badge {
 
     // number of epochs until expiration
     // each episode is 1 month
-    uint256 private _episodes;
+    uint256 private immutable _episodes;
 
     // Badge's metadata
     struct BadgeMeta {
-        // read dynamic NFT
         // time when badge was created
         uint256 start;
         // epochs until expiration
         uint256 daysTillExp;
         // Date when badge expires
         uint256 expirationDate;
+        // Status of badge
+        bool expired;
     }
+
+    // TODO: add metadata for dynamic NFT implementation
 
     // Mapping from token ID to owner's address
     mapping(uint256 => address) private _owners;
@@ -69,29 +134,12 @@ contract Badge {
     // Mapping from owner to operator approvals
     mapping(address => mapping(address => bool)) private _operatorApprovals;
 
-    event Transfer(
-        address indexed from,
-        address indexed to,
-        uint256 indexed tokenId
-    );
-    event Approval(
-        address indexed owner,
-        address indexed approved,
-        uint256 indexed tokenId
-    );
-    event ApprovalForAll(
-        address indexed owner,
-        address indexed operator,
-        bool approved
-    );
-
     constructor(
         string memory badgeName,
         string memory badgeSymbol,
         uint256 episodes
     ) {
         _manager = msg.sender;
-
         _name = badgeName;
         _symbol = badgeSymbol;
         _episodes = episodes;
@@ -107,6 +155,10 @@ contract Badge {
     /// @notice Returns the badge's symbol
     function symbol() public view returns (string memory) {
         return _symbol;
+    }
+
+    function isExpired(uint256 tokenId) public view returns (bool) {
+        return _badgeMeta[tokenId].expired;
     }
 
     // Returns the token ID owned by `owner`, if it exists, and 0 otherwise
@@ -132,13 +184,13 @@ contract Badge {
         return _owners[tokenId] != address(0);
     }
 
-    function mint(address to, uint256 tokenId) external onlyManager {
+    function mint(address to, uint256 tokenId) external virtual onlyManager {
         require(_mint(to, tokenId), "Mint Failed");
     }
 
     /// @notice Mints `tokenId` and transfers it to `to`.
     /// @dev
-    function _mint(address to, uint256 tokenId) internal returns (bool) {
+    function _mint(address to, uint256 tokenId) internal virtual returns (bool) {
         // require(!_exists(tokenId), "Token already minted");
         // require(tokenOf(to) == 0, "Owner already has a token");
 
@@ -154,16 +206,16 @@ contract Badge {
         return true;
     }
 
-    function burn(uint256 tokenId) external onlyManager {
-        _burn(tokenId);
+    function convert(uint256 tokenId) external onlyManager {
+        if (isExpired(tokenId)) revert("Badge: Badge already converted");
+        _convert(tokenId);
     }
 
-    /// @dev Burns `tokenId`.
-    function _burn(uint256 tokenId) internal {
-        address owner = Badge.ownerOf(tokenId);
-
-        delete _tokens[owner];
-        delete _owners[tokenId];
+    /// @dev Convert `tokenId`.
+    function _convert(uint256 tokenId) internal {
+        if (_badgeMeta[tokenId].expirationDate > block.timestamp)
+            revert("Badge: Badge not expired");
+        _badgeMeta[tokenId].expired = true;
     }
 
     function self() public view returns (address) {
@@ -179,7 +231,7 @@ contract Badge {
     function balanceOf(address owner) external view returns (uint256 balance) {
         require(
             owner != address(0),
-            "ERC721: balance query for the zero address"
+            "Badge: balance query for the zero address"
         );
         return _balances[owner];
     }
@@ -192,7 +244,12 @@ contract Badge {
         return _operatorApprovals[owner][operator];
     }
 
-    function getApproved(uint256 tokenId) public view returns (address) {
+    function getApproved(uint256 tokenId)
+        public
+        view
+        onlyExpired(tokenId)
+        returns (address)
+    {
         require(
             _exists(tokenId),
             "ERC721: approved query for nonexistent token"
@@ -205,7 +262,7 @@ contract Badge {
         address from,
         address to,
         uint256 tokenId
-    ) external {
+    ) external onlyExpired(tokenId) {
         safeTransferFrom(from, to, tokenId, "");
     }
 
@@ -214,7 +271,7 @@ contract Badge {
         address to,
         uint256 tokenId,
         bytes memory _data
-    ) public {
+    ) public onlyExpired(tokenId) {
         require(
             _isApprovedOrOwner(_manager, tokenId),
             "ERC721: transfer caller is not owner nor approved"
@@ -312,7 +369,7 @@ contract Badge {
         }
     }
 
-    function approve(address to, uint256 tokenId) public {
+    function approve(address to, uint256 tokenId) public onlyExpired(tokenId) {
         address owner = Badge.ownerOf(tokenId);
         require(to != owner, "ERC721: approval to current owner");
 
@@ -328,7 +385,7 @@ contract Badge {
         address from,
         address to,
         uint256 tokenId
-    ) public {
+    ) public onlyExpired(tokenId) {
         //solhint-disable-next-line max-line-length
         require(
             _isApprovedOrOwner(msg.sender, tokenId),
